@@ -1,0 +1,219 @@
+#!/usr/bin/env python2
+import json
+import re
+
+import html5lib
+import mechanize
+from lxml import html
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+def classes(classes):
+    q = frozenset(classes.split(' '))
+    return dict(attrs={
+        'class': lambda x: x and frozenset(x.split()).intersection(q)})
+
+
+def as_article(source, log):
+    url = source['url']
+    title = source['title']
+    desc = ''
+    if source.get('field_subtitle'):
+        desc += source['field_subtitle']
+    if source.get('field_display_authors'):
+        desc += ' by ' + source['field_display_authors']
+    log(title, url)
+    return {'url': url, 'title': title, 'description': desc}
+
+
+def get_issue_data(br, log, node_id='1124670'):
+    headers = {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Origin': 'https://www.foreignaffairs.com',
+        'Referer': 'https://www.foreignaffairs.com',
+    }
+    data = {
+        "_source": {
+            "includes": [
+                "normalized_date", "field_issue_volume_number",
+                "field_issue_volume", "url", "fa_path", "title",
+                "fa_node_issue_cover_url", "nid",
+                "field_issue_ssection_header",
+                "field_issue_ssection_articles:nid"
+            ]
+        },
+        "query": {
+            "match": {
+                "id": {
+                    "query": node_id
+                }
+            }
+        },
+        "size": 1
+    }
+
+    def get_data(data):
+        search_url = 'https://www.foreignaffairs.com/node/_search'
+        req = mechanize.Request(url=search_url,
+                                data=json.dumps(data),
+                                headers=headers,
+                                method='POST')
+        res = br.open(req)
+        return json.loads(res.read())['hits']['hits']
+
+    issue_data = get_data(data)
+    source = issue_data[0]['_source']
+    nids = source['field_issue_ssection_articles:nid']
+    section_title = source['field_issue_ssection_header']
+
+    data = {
+        '_source': {
+            'includes': [
+                'field_tags:name', 'field_topics:name', 'field_regions:name',
+                'url', 'title', 'field_subtitle', 'field_display_authors',
+                'nid', 'fa_node_has_audio', 'fa_node_paywall_free',
+                'field_capsule_review_category:name',
+                'fa_node_type_or_subtype', 'type'
+            ]
+        },
+        'query': {
+            'terms': {
+                'id': nids
+            }
+        },
+        'size': 30
+    }
+
+    sections_data = get_data(data)
+    log('Found main section:', section_title)
+    main_articles = []
+    for article in sections_data:
+        main_articles.append(as_article(article['_source'], log))
+    feed = {}
+
+    data['size'] = 100
+    data['query'] = {
+        'bool': {
+            'must': [{
+                'terms': {
+                    'fa_node_type_or_subtype': [
+                        'Comment', 'Essay', 'Interview', 'Review Essay',
+                        'Letter From', 'Letter', 'Response', 'Capsule Review'
+                    ]
+                }
+            }, {
+                'term': {
+                    'field_issue:nid': {
+                        'term': '1124670'
+                    }
+                }
+            }],
+            'must_not': [{
+                'terms': {
+                    'id': nids
+                }
+            }]
+        }
+    }
+
+    article_data = get_data(data)
+    for article in article_data:
+        article = article['_source']
+        section = article['fa_node_type_or_subtype']
+        if section not in feed:
+            feed[section] = []
+        feed[section].append(as_article(article, log))
+    ans = []
+    for sec in sorted(feed):
+        ans.append((sec, feed[sec]))
+
+    return [(section_title, main_articles)] + ans
+
+
+class ForeignAffairsRecipe(BasicNewsRecipe):
+
+    ''' there are three modifications:
+    1) fetch issue cover
+    2) toggle ignore premium articles
+    3) extract proper section names, ie. "Comments", "Essay"
+
+    by Chen Wei, 2012-02-05
+
+        Additional modifications to support rebranded website
+
+        by anisotrope, 27 June 2015
+        '''
+
+    __license__ = 'GPL v3'
+    __author__ = 'Rick Shang, kwetal, anisotrope'
+    language = 'en'
+    version = 1.02
+
+    title = u'Foreign Affairs (Subcription)'
+    publisher = u'Council on Foreign Relations'
+    category = u'USA, Foreign Affairs'
+    description = u'The leading forum for serious discussion of American foreign policy and international affairs.'
+
+    no_stylesheets = True
+    remove_javascript = True
+    needs_subscription = True
+
+    INDEX = 'https://www.foreignaffairs.com'
+    FRONTPAGE = INDEX + '/magazine'
+
+    keep_only_tags = [
+        classes('article-header article-body'),
+    ]
+
+    conversion_options = {'comments': description, 'tags': category, 'language': 'en',
+                          'publisher': publisher}
+
+    def parse_index(self):
+        soup = self.index_to_soup(self.FRONTPAGE)
+        # get dates
+        date = re.split(r'\s\|\s', self.tag_to_string(
+            soup.head.title.string))[0]
+        self.title = "Foreign Affairs ({})".format(date)
+        self.timefmt = u' [%s]' % date
+        cls = soup.find('body')['class']
+        if isinstance(cls, (list, tuple)):
+            cls = ' '.join(cls)
+        node_id = re.search(r'\bpage-node-(\d+)\b', cls).group(1)
+        br = self.cloned_browser
+        return get_issue_data(br, self.log, node_id)
+
+    def clean_fa_html(self, root):
+        for svg in tuple(root.iter('{*}svg')):
+            svg.getparent().remove(svg)
+        for meta in tuple(root.iter('{*}meta')):
+            meta.getparent().remove(meta)
+        return root
+
+    def preprocess_raw_html(self, raw_html, url):
+        root = html5lib.parse(raw_html, treebuilder='lxml',
+                              namespaceHTMLElements=False).getroot()
+        self.clean_fa_html(root)
+        return html.tostring(root, encoding='unicode')
+
+    def preprocess_html(self, soup):
+        for attr in ('ng-src', 'data-blazy'):
+            for img in soup.findAll('img', attrs={attr: True}):
+                img['src'] = img[attr]
+        return soup
+
+    def get_browser(self):
+
+        def select_form(form):
+            return form.attrs.get('id', None) == 'user-login'
+
+        br = BasicNewsRecipe.get_browser(self)
+        if self.username is not None and self.password is not None:
+            br.open(
+                'https://www.foreignaffairs.com/user?destination=user%3Fop%3Dlo')
+            br.select_form(predicate=select_form)
+            br.form['name'] = self.username
+            br.form['pass'] = self.password
+            br.submit()
+        return br
