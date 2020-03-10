@@ -97,10 +97,13 @@ def get_sip_dir():
     if iswindows:
         q = os.path.join(sys.prefix, 'share', 'sip')
     elif isfreebsd:
-        q = os.path.join(sys.prefix, 'share', 'py-sip')
+        q = os.path.join('/usr/', 'share', 'sip')
+        # q = os.path.join(sys.prefix, 'share', 'py-sip')
     else:
-        q = os.path.join(sys.prefix, 'share', 'sip')
+        q = os.path.join('/usr/', 'share', 'sip')
+        # q = os.path.join(sys.prefix, 'share', 'sip')
     q = os.environ.get('SIP_DIR', q)
+    print("q var -> {}".format(q))
     for x in ('', 'Py2-PyQt5', 'PyQt5', 'sip/PyQt5'):
         base = os.path.join(q, x)
         if os.path.exists(os.path.join(base, 'QtWidgets')):

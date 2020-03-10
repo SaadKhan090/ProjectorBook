@@ -34,6 +34,7 @@ while (index < 15):
                 #print(doc.get_body_content())
                 soup = BeautifulSoup(doc.get_body_content(),'html.parser')
                 print(soup.get_text())
+                print("LENGTH OF CHAPTER -> {}".format(len(soup.get_text())))
             ctr += 1
             
         prev_index = index
